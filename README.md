@@ -14,7 +14,7 @@ It solves two common annoyances:
 - Import any size `.sql` file directly through `mysql.exe` (no phpMyAdmin upload limit)
 - Live progress bar while importing (based on bytes streamed)
 - Dropdown to select an existing database, or create a new one from the app
-- 🔍 Scan a database for columns named like `email`, `Email`, `phone`, `PhoneNumber`, `Contact_number`, `mobile`, `cellphone`, etc.
+- Scan a database for columns named like `email`, `Email`, `phone`, `PhoneNumber`, `Contact_number`, `mobile`, `cellphone`, etc.
 - Review/uncheck detected columns before replacing anything
 - One replacement value for all emails, one for all phone numbers
 - Save your connection settings (mysql.exe path, host, port, user) so you don't retype them every time
