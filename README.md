@@ -68,6 +68,10 @@ Click **Refresh list** to load your existing databases, or **New database...** t
 ### 4. Import a `.sql` file
 Click **Browse...**, pick your file, then **Import Now**. A confirmation dialog will show which file goes into which database before anything runs. The progress bar tracks bytes sent to MySQL, so it works even for very large dump files.
 
+The **Continue after SQL errors** option is enabled by default. It uses the MySQL client's `--force` option to keep processing later statements if one SQL statement fails. Skipped statements are shown in the log and the import is reported as partially completed. A lost connection or stopped MySQL server still ends the import; the app cannot safely resume at an arbitrary point in a dump.
+
+Before importing, the app checks the server's `max_allowed_packet` and raises it to 64 MB when permitted. It also sets the mysql client limit to 64 MB. If your dump contains a single SQL statement larger than 64 MB, increase both limits before importing.
+
 ### 5. Sanitize Data (replace Email & Phone values)
 Use this when you've imported a copy of a **live/production** database and want to scrub personal data before using it locally:
 

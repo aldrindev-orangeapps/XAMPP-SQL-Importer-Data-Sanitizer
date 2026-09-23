@@ -1,6 +1,7 @@
 import os
 import threading
 import subprocess
+import tempfile
 import configparser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -55,6 +56,7 @@ class SqlImporterApp:
         self.user = tk.StringVar(value="root")
         self.password = tk.StringVar(value="")
         self.sql_file = tk.StringVar()
+        self.continue_on_error = tk.BooleanVar(value=True)
         self.selected_db = tk.StringVar()
         self.status = tk.StringVar(value="Ready.")
 
@@ -166,6 +168,8 @@ class SqlImporterApp:
         row_f.pack(fill="x", padx=6, pady=6)
         ttk.Entry(row_f, textvariable=self.sql_file, width=45).pack(side="left")
         ttk.Button(row_f, text="Browse...", command=self.browse_sql_file).pack(side="left", padx=6)
+        ttk.Checkbutton(frm_file, text="Continue after SQL errors (skipped statements will be reported)",
+                        variable=self.continue_on_error).pack(anchor="w", padx=6)
         self.import_btn = ttk.Button(frm_file, text="Import Now", style="Import.TButton",
                                       command=self.start_import)
         self.import_btn.pack(anchor="e", padx=6, pady=(0, 8))
@@ -323,33 +327,67 @@ class SqlImporterApp:
         sql_path = self.sql_file.get()
         db_name = self.selected_db.get()
         total_size = os.path.getsize(sql_path)
-        cmd = self._build_base_cmd() + [db_name]
+        packet_size = 64 * 1024 * 1024
+        cmd = self._build_base_cmd() + [f"--max-allowed-packet={packet_size}"]
+        if self.continue_on_error.get():
+            cmd.append("--force")
+        cmd.append(db_name)
 
+        proc = None
         try:
-            proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-            sent = 0
-            chunk_size = 1024 * 1024
-            with open(sql_path, "rb") as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    proc.stdin.write(chunk)
-                    sent += len(chunk)
-                    pct = int(sent / total_size * 100) if total_size else 100
-                    self.root.after(0, self._update_progress, pct)
+            # The server limit is separate from the mysql.exe client limit.
+            # SET GLOBAL applies to new connections, including the import below.
+            check = self._run_cmd(["-N", "-B", "-e", "SHOW GLOBAL VARIABLES LIKE 'max_allowed_packet';"])
+            if check.returncode != 0:
+                raise RuntimeError(check.stderr.strip() or "Could not check MySQL packet limit.")
+            current_limit = int(check.stdout.split()[-1])
+            if current_limit < packet_size:
+                update = self._run_cmd(["-e", f"SET GLOBAL max_allowed_packet={packet_size};"])
+                if update.returncode != 0:
+                    raise RuntimeError(
+                        "MySQL server max_allowed_packet is too small for large SQL statements "
+                        f"({current_limit // 1048576} MB). Set max_allowed_packet=64M in "
+                        "XAMPP's my.ini under [mysqld], restart MySQL, then retry.\n\n"
+                        + update.stderr.strip()
+                    )
+            # A pipe can fill while a large import is running. Spool errors to disk
+            # so mysql can always report the actual SQL or connection failure.
+            with tempfile.TemporaryFile() as error_file:
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=error_file,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                sent = 0
+                with open(sql_path, "rb") as sql_file:
+                    try:
+                        while chunk := sql_file.read(1024 * 1024):
+                            proc.stdin.write(chunk)
+                            sent += len(chunk)
+                            pct = int(sent / total_size * 100) if total_size else 100
+                            self.root.after(0, self._update_progress, pct)
+                    except BrokenPipeError:
+                        # mysql exited early; its stderr explains why.
+                        pass
+                    finally:
+                        try:
+                            proc.stdin.close()
+                        except BrokenPipeError:
+                            pass
 
-            proc.stdin.close()
-            out, err = proc.communicate()
-
-            if proc.returncode == 0:
-                self.root.after(0, self._import_done, True, "")
-            else:
-                self.root.after(0, self._import_done, False, err.decode(errors="ignore"))
+                return_code = proc.wait()
+                error_file.seek(0)
+                error = error_file.read().decode(errors="replace").strip()
+                if return_code == 0 and sent == total_size and not error:
+                    self.root.after(0, self._import_done, True, "")
+                elif return_code == 0 and sent == total_size:
+                    self.root.after(0, self._import_done, None, error)
+                else:
+                    self.root.after(0, self._import_done, False,
+                                    error or f"mysql.exe exited with code {return_code}.")
         except Exception as e:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait()
             self.root.after(0, self._import_done, False, str(e))
 
     def _update_progress(self, pct):
@@ -363,6 +401,13 @@ class SqlImporterApp:
             self.status.set("Done! Import successful.")
             self.log("Import successful.")
             messagebox.showinfo("Done", "Import successful!")
+        elif success is None:
+            self.progress["value"] = 100
+            self.status.set("Import finished with SQL errors; some statements were skipped.")
+            self.log("Import finished with SQL errors:\n" + error_msg)
+            messagebox.showwarning("Import partially completed",
+                                   "Import reached the end of the file, but some SQL statements failed. "
+                                   "Check the log for details.\n\n" + error_msg[:2000])
         else:
             self.status.set("Import failed.")
             self.log("Error: " + error_msg)
